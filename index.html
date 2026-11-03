@@ -3,100 +3,422 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>Snake</title>
+<title>Weed Wars</title>
 <style>
-  body { margin:0; background:#111; color:#fff; font-family:sans-serif;
-         display:flex; flex-direction:column; align-items:center; padding-top:20px; }
-  canvas { background:#1b1b1b; border:2px solid #2ecc71; touch-action:none; }
-  #score { font-size:20px; margin-bottom:10px; }
-  button { margin-top:12px; padding:10px 24px; font-size:16px; border:0;
-           border-radius:8px; background:#2ecc71; color:#111; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0e1a10; color:#fff; font-family:system-ui,sans-serif;
+         display:flex; justify-content:center; padding:12px; }
+  #wrap { position:relative; width:100%; max-width:800px; }
+  canvas { width:100%; height:auto; display:block; background:#2e7d32;
+           border:3px solid #66bb6a; border-radius:10px; touch-action:none; }
+  #overlay { position:absolute; inset:0; display:flex; flex-direction:column;
+             align-items:center; justify-content:center; text-align:center;
+             background:rgba(5,20,8,.85); border-radius:10px; padding:16px; overflow:auto; }
+  h1 { margin:0 0 8px; color:#a5d6a7; font-size:clamp(24px,5vw,40px); }
+  p { margin:6px 0; opacity:.85; }
+  button { font-size:16px; padding:10px 20px; margin:5px; border:0; border-radius:8px;
+           background:#66bb6a; color:#0e1a10; font-weight:700; cursor:pointer; }
+  button:disabled { background:#37523a; color:#8aa08c; cursor:not-allowed; }
+  .shop { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+          gap:6px; width:100%; margin:8px 0; }
+  .shop button { text-align:left; font-weight:500; }
+  .shop small { display:block; opacity:.8; }
 </style>
 </head>
 <body>
-<div id="score">Score: 0</div>
-<canvas id="c" width="320" height="320"></canvas>
-<button onclick="reset()">Restart</button>
-<p style="opacity:.6">Arrow keys / WASD, or swipe</p>
+<div id="wrap">
+  <canvas id="c" width="800" height="500"></canvas>
+  <div id="overlay"></div>
+</div>
 
 <script>
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-const size = 16, tiles = canvas.width / size;
-let snake, dir, food, score, loop;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const ov = document.getElementById('overlay');
+const W = 800, H = 500;
 
-function reset() {
-  snake = [{x:10, y:10}];
-  dir = {x:1, y:0};
-  score = 0;
-  placeFood();
-  document.getElementById('score').textContent = 'Score: 0';
-  clearInterval(loop);
-  loop = setInterval(tick, 120);
+let state = 'menu', paused = false;
+let P, bullets, enemies, coins, parts, wave, toSpawn, spawnT, score, shake = 0;
+let up = {dmg:0, rate:0, speed:0, hp:0, multi:0};
+let best = 0;
+try { best = +localStorage.getItem('wwBest') || 0; } catch(e) {}
+
+const keys = {};
+const mouse = {x:W/2, y:H/2, down:false};
+let touch = null;
+
+const TYPES = {
+  weed:    {r:12, hp:w=>2+w*0.4,  sp:w=>50+w*2,  dmg:1, pts:10,  coin:1,  col:'#2e5e1e'},
+  thistle: {r:9,  hp:w=>1+w*0.15, sp:w=>110+w*3, dmg:1, pts:15,  coin:1,  col:'#8e44ad'},
+  bush:    {r:22, hp:w=>10+w*1.5, sp:w=>35,      dmg:2, pts:40,  coin:4,  col:'#12401c'},
+  boss:    {r:40, hp:w=>60+w*12,  sp:w=>40,      dmg:3, pts:300, coin:25, col:'#7b3f12'}
+};
+
+const SHOP = [
+  {id:'dmg',   name:'Sharper Blades',  desc:'+50% damage',        base:10, max:10},
+  {id:'rate',  name:'Faster Engine',   desc:'Shoot faster',       base:10, max:10},
+  {id:'speed', name:'Turbo Wheels',    desc:'Move faster',        base:8,  max:8},
+  {id:'hp',    name:'Steel Chassis',   desc:'+1 max HP and heal', base:12, max:8},
+  {id:'multi', name:'Multi-Shot',      desc:'+1 blade per shot',  base:25, max:2}
+];
+
+const stat = {
+  dmg:   () => 1 + up.dmg * 0.5,
+  delay: () => 0.4 * Math.pow(0.85, up.rate),
+  speed: () => 170 + up.speed * 22,
+  maxHp: () => 5 + up.hp,
+  shots: () => 1 + up.multi
+};
+
+function newGame() {
+  up = {dmg:0, rate:0, speed:0, hp:0, multi:0};
+  P = {x:W/2, y:H/2, r:14, hp:5, inv:0, cool:0, ang:0, coins:0};
+  bullets = []; enemies = []; coins = []; parts = [];
+  wave = 0; score = 0;
+  startWave();
 }
 
-function placeFood() {
-  do {
-    food = {x: Math.floor(Math.random()*tiles), y: Math.floor(Math.random()*tiles)};
-  } while (snake.some(s => s.x === food.x && s.y === food.y));
+function startWave() {
+  wave++;
+  toSpawn = 4 + wave * 3;
+  spawnT = 0;
+  state = 'play';
+  ov.style.display = 'none';
+  if (wave % 5 === 0) spawnEnemy('boss');
 }
 
-function tick() {
-  const head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
-  if (head.x < 0 || head.y < 0 || head.x >= tiles || head.y >= tiles ||
-      snake.some(s => s.x === head.x && s.y === head.y)) {
-    clearInterval(loop);
-    ctx.fillStyle = 'rgba(0,0,0,.7)';
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-    ctx.fillStyle = '#fff';
-    ctx.font = '24px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('Game Over', canvas.width/2, canvas.height/2);
-    return;
+function pickType() {
+  const r = Math.random();
+  if (wave >= 5 && r < 0.15) return 'bush';
+  if (wave >= 3 && r < 0.4) return 'thistle';
+  return 'weed';
+}
+
+function spawnEnemy(type) {
+  const t = TYPES[type];
+  const side = Math.floor(Math.random() * 4);
+  let x, y;
+  if (side === 0) { x = Math.random()*W; y = -t.r; }
+  else if (side === 1) { x = W + t.r; y = Math.random()*H; }
+  else if (side === 2) { x = Math.random()*W; y = H + t.r; }
+  else { x = -t.r; y = Math.random()*H; }
+  const hp = t.hp(wave);
+  enemies.push({type, x, y, r:t.r, hp, maxHp:hp, sp:t.sp(wave), dmg:t.dmg, flash:0});
+}
+
+function nearestEnemy() {
+  let best = null, bd = Infinity;
+  for (const e of enemies) {
+    const d = (e.x-P.x)**2 + (e.y-P.y)**2;
+    if (d < bd) { bd = d; best = e; }
   }
-  snake.unshift(head);
-  if (head.x === food.x && head.y === food.y) {
-    score++;
-    document.getElementById('score').textContent = 'Score: ' + score;
-    placeFood();
-  } else {
-    snake.pop();
-  }
-  draw();
+  return best;
 }
 
+function burst(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 40 + Math.random() * 160;
+    parts.push({x, y, vx:Math.cos(a)*s, vy:Math.sin(a)*s, life:0.4+Math.random()*0.3, col});
+  }
+}
+
+function update(dt) {
+  // movement
+  let dx = 0, dy = 0;
+  if (keys['a'] || keys['arrowleft'])  dx -= 1;
+  if (keys['d'] || keys['arrowright']) dx += 1;
+  if (keys['w'] || keys['arrowup'])    dy -= 1;
+  if (keys['s'] || keys['arrowdown'])  dy += 1;
+  if (touch) { dx = touch.vx; dy = touch.vy; }
+  const len = Math.hypot(dx, dy);
+  if (len > 1) { dx /= len; dy /= len; }
+  P.x = Math.max(P.r, Math.min(W - P.r, P.x + dx * stat.speed() * dt));
+  P.y = Math.max(P.r, Math.min(H - P.r, P.y + dy * stat.speed() * dt));
+
+  // aim + fire
+  const auto = !!touch;
+  let target = null;
+  if (auto) target = nearestEnemy();
+  if (target) P.ang = Math.atan2(target.y - P.y, target.x - P.x);
+  else P.ang = Math.atan2(mouse.y - P.y, mouse.x - P.x);
+
+  P.cool -= dt;
+  P.inv -= dt;
+  const wantFire = mouse.down || keys[' '] || (auto && target);
+  if (wantFire && P.cool <= 0) {
+    P.cool = stat.delay();
+    const n = stat.shots(), spread = 0.18;
+    for (let i = 0; i < n; i++) {
+      const a = P.ang + (i - (n-1)/2) * spread;
+      bullets.push({x:P.x, y:P.y, vx:Math.cos(a)*520, vy:Math.sin(a)*520, life:1.2, dmg:stat.dmg()});
+    }
+  }
+
+  // spawning
+  if (toSpawn > 0) {
+    spawnT -= dt;
+    if (spawnT <= 0) {
+      spawnEnemy(pickType());
+      toSpawn--;
+      spawnT = Math.max(0.25, 1.0 - wave * 0.05);
+    }
+  }
+
+  // bullets
+  for (const b of bullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    for (const e of enemies) {
+      if (e.hp > 0 && Math.hypot(e.x - b.x, e.y - b.y) < e.r + 4) {
+        e.hp -= b.dmg; e.flash = 0.1; b.life = 0;
+        e.x += Math.cos(Math.atan2(b.vy, b.vx)) * 4;
+        e.y += Math.sin(Math.atan2(b.vy, b.vx)) * 4;
+        burst(b.x, b.y, '#c5e1a5', 3);
+        break;
+      }
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0 && b.x > -20 && b.x < W+20 && b.y > -20 && b.y < H+20);
+
+  // enemies
+  for (const e of enemies) {
+    if (e.hp <= 0) continue;
+    const a = Math.atan2(P.y - e.y, P.x - e.x);
+    e.x += Math.cos(a) * e.sp * dt;
+    e.y += Math.sin(a) * e.sp * dt;
+    e.flash -= dt;
+    for (const o of enemies) {           // light separation
+      if (o === e || o.hp <= 0) continue;
+      const d = Math.hypot(e.x - o.x, e.y - o.y), m = e.r + o.r;
+      if (d > 0 && d < m) {
+        e.x += (e.x - o.x) / d * 30 * dt;
+        e.y += (e.y - o.y) / d * 30 * dt;
+      }
+    }
+    if (P.inv <= 0 && Math.hypot(e.x - P.x, e.y - P.y) < e.r + P.r - 2) {
+      P.hp -= e.dmg; P.inv = 1; shake = 8;
+      burst(P.x, P.y, '#ef5350', 12);
+    }
+  }
+  for (const e of enemies) {
+    if (e.hp <= 0) {
+      const t = TYPES[e.type];
+      score += t.pts;
+      burst(e.x, e.y, t.col, e.type === 'boss' ? 40 : 10);
+      for (let i = 0; i < t.coin; i++)
+        coins.push({x:e.x + (Math.random()-.5)*20, y:e.y + (Math.random()-.5)*20});
+      if (e.type === 'boss') shake = 14;
+    }
+  }
+  enemies = enemies.filter(e => e.hp > 0);
+
+  // coins
+  for (const c of coins) {
+    const d = Math.hypot(P.x - c.x, P.y - c.y);
+    if (d < 100) { c.x += (P.x - c.x) / d * 260 * dt; c.y += (P.y - c.y) / d * 260 * dt; }
+    if (d < 18) { c.got = true; P.coins++; }
+  }
+  coins = coins.filter(c => !c.got);
+
+  // particles
+  for (const p of parts) { p.x += p.vx*dt; p.y += p.vy*dt; p.life -= dt; }
+  parts = parts.filter(p => p.life > 0);
+
+  // end conditions
+  if (P.hp <= 0) return gameOver();
+  if (toSpawn === 0 && enemies.length === 0) showShop();
+}
+
+function gameOver() {
+  state = 'over';
+  if (score > best) { best = score; try { localStorage.setItem('wwBest', best); } catch(e) {} }
+  ov.style.display = 'flex';
+  ov.innerHTML = `<h1>Game Over</h1>
+    <p>You reached wave ${wave} with ${score} points.</p>
+    <p>Best: ${best}</p>
+    <button id="again">Play again</button>`;
+  document.getElementById('again').onclick = newGame;
+}
+
+function showShop() {
+  state = 'shop';
+  P.hp = Math.min(stat.maxHp(), P.hp + 1);
+  ov.style.display = 'flex';
+  render();
+  function render() {
+    let html = `<h1>Wave ${wave} cleared!</h1>
+      <p>Coins: <b>${P.coins}</b> &nbsp;|&nbsp; HP: ${P.hp}/${stat.maxHp()}</p>
+      <div class="shop">`;
+    for (const it of SHOP) {
+      const lvl = up[it.id], maxed = lvl >= it.max, cost = it.base * (lvl + 1);
+      html += `<button data-id="${it.id}" ${maxed || P.coins < cost ? 'disabled' : ''}>
+        ${it.name} (Lv ${lvl}) <small>${it.desc} &mdash; ${maxed ? 'MAX' : cost + ' coins'}</small></button>`;
+    }
+    const healDis = P.hp >= stat.maxHp() || P.coins < 6;
+    html += `<button data-id="heal" ${healDis ? 'disabled' : ''}>Repair
+      <small>Heal 2 HP &mdash; 6 coins</small></button></div>
+      <button id="next">Start wave ${wave + 1}</button>`;
+    ov.innerHTML = html;
+    ov.querySelectorAll('.shop button').forEach(b => b.onclick = () => {
+      const id = b.dataset.id;
+      if (id === 'heal') { P.coins -= 6; P.hp = Math.min(stat.maxHp(), P.hp + 2); }
+      else {
+        const it = SHOP.find(s => s.id === id), cost = it.base * (up[id] + 1);
+        P.coins -= cost; up[id]++;
+        if (id === 'hp') P.hp = Math.min(stat.maxHp(), P.hp + 1);
+      }
+      render();
+    });
+    document.getElementById('next').onclick = startWave;
+  }
+}
+
+function showMenu() {
+  state = 'menu';
+  ov.style.display = 'flex';
+  ov.innerHTML = `<h1>Weed Wars</h1>
+    <p>Your lawn is under attack. Mow them all down.</p>
+    <p><b>Move:</b> WASD / arrows &nbsp; <b>Shoot:</b> hold mouse or Space<br>
+    <b>Phone:</b> drag to move, it aims and fires for you</p>
+    <p>Collect coins, upgrade between waves, survive the bosses.</p>
+    <p>Best score: ${best}</p>
+    <button id="start">Start</button>`;
+  document.getElementById('start').onclick = newGame;
+}
+
+// ---------- drawing ----------
 function draw() {
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  ctx.fillStyle = '#e74c3c';
-  ctx.fillRect(food.x*size, food.y*size, size-2, size-2);
-  ctx.fillStyle = '#2ecc71';
-  snake.forEach(s => ctx.fillRect(s.x*size, s.y*size, size-2, size-2));
+  ctx.save();
+  if (shake > 0) { ctx.translate((Math.random()-.5)*shake, (Math.random()-.5)*shake); shake *= 0.85; if (shake < .5) shake = 0; }
+
+  // mowed stripes
+  for (let i = 0; i < 10; i++) {
+    ctx.fillStyle = i % 2 ? '#2e7d32' : '#388e3c';
+    ctx.fillRect(i * 80, 0, 80, H);
+  }
+  if (!P) { ctx.restore(); return; }
+
+  // coins
+  ctx.fillStyle = '#ffd54f';
+  for (const c of coins) { ctx.beginPath(); ctx.arc(c.x, c.y, 5, 0, 7); ctx.fill(); }
+
+  // enemies
+  for (const e of enemies) {
+    const t = TYPES[e.type];
+    ctx.fillStyle = e.flash > 0 ? '#fff' : t.col;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, 7); ctx.fill();
+    if (e.type === 'thistle') {
+      ctx.strokeStyle = '#d7a8e8'; ctx.lineWidth = 2;
+      for (let i = 0; i < 8; i++) {
+        const a = i * Math.PI / 4;
+        ctx.beginPath();
+        ctx.moveTo(e.x + Math.cos(a) * e.r, e.y + Math.sin(a) * e.r);
+        ctx.lineTo(e.x + Math.cos(a) * (e.r + 5), e.y + Math.sin(a) * (e.r + 5));
+        ctx.stroke();
+      }
+    }
+    if (e.type === 'weed' || e.type === 'bush') {
+      ctx.fillStyle = 'rgba(255,255,255,.12)';
+      ctx.beginPath(); ctx.arc(e.x - e.r*.3, e.y - e.r*.3, e.r*.4, 0, 7); ctx.fill();
+    }
+    if (e.type === 'boss') {
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(e.x - 13, e.y - 8, 7, 0, 7); ctx.arc(e.x + 13, e.y - 8, 7, 0, 7); ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.beginPath(); ctx.arc(e.x - 13, e.y - 8, 3, 0, 7); ctx.arc(e.x + 13, e.y - 8, 3, 0, 7); ctx.fill();
+    }
+    if (e.hp < e.maxHp) {
+      ctx.fillStyle = '#000'; ctx.fillRect(e.x - e.r, e.y - e.r - 9, e.r * 2, 4);
+      ctx.fillStyle = '#ef5350'; ctx.fillRect(e.x - e.r, e.y - e.r - 9, e.r * 2 * (e.hp / e.maxHp), 4);
+    }
+  }
+
+  // bullets
+  ctx.fillStyle = '#e6ee9c';
+  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, 7); ctx.fill(); }
+
+  // player (green diamond mower)
+  if (P.inv <= 0 || Math.floor(P.inv * 12) % 2 === 0) {
+    ctx.save();
+    ctx.translate(P.x, P.y); ctx.rotate(P.ang);
+    ctx.fillStyle = '#b2ff59'; ctx.strokeStyle = '#1b5e20'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(18, 0); ctx.lineTo(0, -14); ctx.lineTo(-14, 0); ctx.lineTo(0, 14); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#263238'; ctx.fillRect(10, -3, 12, 6);   // barrel
+    ctx.restore();
+  }
+
+  // particles
+  for (const p of parts) {
+    ctx.globalAlpha = Math.max(0, p.life * 2);
+    ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  // HUD
+  ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, W, 32);
+  ctx.font = 'bold 16px system-ui'; ctx.textAlign = 'left'; ctx.fillStyle = '#fff';
+  let hearts = '';
+  for (let i = 0; i < stat.maxHp(); i++) hearts += i < P.hp ? '\u2665' : '\u2661';
+  ctx.fillStyle = '#ff8a80'; ctx.fillText(hearts, 10, 22);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.fillText('Wave ' + wave + '  \u2022  Left: ' + (toSpawn + enemies.length), W / 2, 22);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffd54f';
+  ctx.fillText('Coins ' + P.coins + '   ', W - 120, 22);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Score ' + score, W - 10, 22);
+
+  if (paused) {
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 36px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('Paused (press P)', W / 2, H / 2);
+  }
 }
 
-function turn(x, y) {
-  if (x !== -dir.x || y !== -dir.y) dir = {x, y};
-}
-
-document.addEventListener('keydown', e => {
+// ---------- input ----------
+addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
-  if (k === 'arrowup' || k === 'w') turn(0,-1);
-  if (k === 'arrowdown' || k === 's') turn(0,1);
-  if (k === 'arrowleft' || k === 'a') turn(-1,0);
-  if (k === 'arrowright' || k === 'd') turn(1,0);
+  keys[k] = true;
+  if (k === 'p' && state === 'play') paused = !paused;
+  if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) e.preventDefault();
 });
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
-let sx, sy;
-canvas.addEventListener('touchstart', e => {
-  sx = e.touches[0].clientX; sy = e.touches[0].clientY;
-});
-canvas.addEventListener('touchend', e => {
-  const dx = e.changedTouches[0].clientX - sx;
-  const dy = e.changedTouches[0].clientY - sy;
-  if (Math.abs(dx) > Math.abs(dy)) turn(dx > 0 ? 1 : -1, 0);
-  else turn(0, dy > 0 ? 1 : -1);
-});
+function setMouse(e) {
+  const r = cv.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * W / r.width;
+  mouse.y = (e.clientY - r.top) * H / r.height;
+}
+cv.addEventListener('mousemove', setMouse);
+cv.addEventListener('mousedown', e => { setMouse(e); mouse.down = true; });
+addEventListener('mouseup', () => mouse.down = false);
 
-reset();
+cv.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  touch = {sx:t.clientX, sy:t.clientY, vx:0, vy:0};
+}, {passive:false});
+cv.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!touch) return;
+  const t = e.touches[0];
+  touch.vx = Math.max(-1, Math.min(1, (t.clientX - touch.sx) / 40));
+  touch.vy = Math.max(-1, Math.min(1, (t.clientY - touch.sy) / 40));
+}, {passive:false});
+cv.addEventListener('touchend', () => touch = null);
+
+// ---------- loop ----------
+let last = 0;
+function frame(t) {
+  const dt = Math.min(0.033, (t - last) / 1000);
+  last = t;
+  if (state === 'play' && !paused) update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+showMenu();
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
